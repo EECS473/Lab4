@@ -10,6 +10,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>	/* printk() */
 #include <linux/gpio.h>
+#inlcude <linux/pwm.h>
 
 #include <linux/slab.h>		/* kmalloc() */
 #include <linux/fs.h>		/* everything... */
