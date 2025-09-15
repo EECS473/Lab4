@@ -71,7 +71,7 @@ while True:
     cy = h // 2
 
     # Uncomment if you need to adjust HSV threshold
-    # print(f"HSV at center: {frame[cy, cx]}")
+    # print(f"HSV at center: {hsv[cy, cx]}")
 
     # find contours in the mask and initialize the current
     # (x, y) center of the object
