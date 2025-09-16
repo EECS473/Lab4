@@ -60,7 +60,7 @@ ssize_t memory_write (struct file *filp, const char *buf, size_t count,
 		      loff_t * f_pos);
 void memory_exit (void);
 int memory_init (void);
-//int memory_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
+//long memory_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 
 void setPin(int PIN);
 void removePin(int PIN);
