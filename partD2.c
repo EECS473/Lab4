@@ -1,8 +1,9 @@
+
 /**
  * @file    h-bridge device driver
  * @author  Kevin Yang
  * @date    3/20/2017
- * @brief   Solution code for a kernel module that controls a h-bridge. 
+ * @brief   Solution code for a kernel module that controls a h-bridge.
  *          Pin mounts and commands are defined below.
  */
 
@@ -10,6 +11,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>	/* printk() */
 #include <linux/gpio.h>
+#include <linux/pwm.h>
 
 #include <linux/slab.h>		/* kmalloc() */
 #include <linux/fs.h>		/* everything... */
@@ -37,20 +39,25 @@ MODULE_LICENSE ("Dual BSD/GPL");
 
 //Adjust to add intermediate speeds
 #define IDLE    0
-#define SPEED   1
+int     SPEED   = 40;
 
 //Adjust to reverse motor polarity
 int LEFT_MOTOR  = true;
 int RIGHT_MOTOR = false;
 
-//These pins are for the RPI3 B, adjust if using a different board
-#define EN1 20  //pwm pin, left motor
-#define EN2 21  //pwm pin, right motor
-#define A_1 6   //Y1, left motor positive
-#define A_2 13  //Y2, left motor negative
+//These pins are for the RPI4 B, adjust if using a different board
+
+//PWM pins are configured in /boot/config.txt
+//Left motor enable configured to pin 12
+//Right motor enable configured to pin 13
+
+struct pwm_device *pwm0 = NULL;  //pin 12
+struct pwm_device *pwm1 = NULL;  //pin 13
+
+#define A_1 5   //Y1, left motor positive
+#define A_2 6   //Y2, left motor negative
 #define A_3 19  //Y3, right motor positive
 #define A_4 26  //Y4, right motor negative
-
 
 int memory_open (struct inode *inode, struct file *filp);
 int memory_release (struct inode *inode, struct file *filp);
@@ -60,13 +67,15 @@ ssize_t memory_write (struct file *filp, const char *buf, size_t count,
 		      loff_t * f_pos);
 void memory_exit (void);
 int memory_init (void);
-//long memory_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
+long memory_ioctl (struct file *filp, unsigned int cmd, unsigned long arg);
 
 void setPin(int PIN);
 void removePin(int PIN);
+struct pwm_device *enPWM(int pwm_num);
+void removePWM(struct pwm_device *pwm);
 void moveRobot(char command);
 void motorControl(bool ifLeftMotor, char command);
-
+void pwm_duty_cycle(struct pwm_device *pwm, int percent);
 
 struct file_operations memory_fops = 
 {
@@ -74,7 +83,7 @@ struct file_operations memory_fops =
   .write = memory_write,
   .open = memory_open,
   .release = memory_release,
-//  .unlocked_ioctl = memory_ioctl
+  .unlocked_ioctl = memory_ioctl
 };
 
 module_init (memory_init);
@@ -100,14 +109,14 @@ int memory_init (void) {
 
 	memset (memory_buffer, 0, 1);
 	printk ("Inserting memory module\n");
-   
-    setPin(EN1);
-    setPin(EN2);
+
     setPin(A_1);
     setPin(A_2);
     setPin(A_3);
-    setPin(A_4); 
-    
+    setPin(A_4);
+    pwm0 = enPWM(0);
+    pwm1 = enPWM(1);
+
     return 0;
 
 fail:
@@ -121,14 +130,14 @@ void memory_exit (void) {
 	    kfree (memory_buffer);
 	}
 	printk ("Removing memory module\n");
-     
-    removePin(EN1);
-    removePin(EN2);
+
+    removePWM(pwm0);
+    removePWM(pwm1);
     removePin(A_1);
     removePin(A_2);
     removePin(A_3);
     removePin(A_4);
-    
+
     printk("GPIO freed, goodbye\n");
 }
 
@@ -159,7 +168,7 @@ ssize_t memory_write (struct file * filp, const char *buf, size_t count, loff_t 
 		printk("mem_write error");
 		return(count);//just do nothing but say you did all the chars
 	}
-	f_pos += 1;	
+	f_pos += 1;
 
 	if (memory_buffer[0] == 'F') {
 	    moveRobot(FORWARD);
@@ -172,7 +181,7 @@ ssize_t memory_write (struct file * filp, const char *buf, size_t count, loff_t 
     }
 	if (memory_buffer[0] == 'R') {
 	    moveRobot(RIGHT);
-    }    
+    }
 	if (memory_buffer[0] == 'S') {
 	    moveRobot(STOP);
     }
@@ -180,8 +189,24 @@ ssize_t memory_write (struct file * filp, const char *buf, size_t count, loff_t 
 	return 1;
 }
 
+struct pwm_device *enPWM(int pwm_num) {
+    struct pwm_device *pwm = pwm_request(pwm_num, "PWM");
+    if(pwm == NULL) {
+	printk("Could not get PWM%d!\n", pwm_num);
+	return NULL;
+    }
+    //set PWM to 100hz with SPEED% duty cycle
+    pwm_duty_cycle(pwm, SPEED);
+    pwm_enable(pwm);
+    return pwm;
+}
+
+void removePWM(struct pwm_device *pwm){
+    pwm_disable(pwm);
+    pwm_free(pwm);
+}
+
 void setPin(int PIN) {
-    
     if (!gpio_is_valid(PIN)) {
         printk("Invalid GPIO pin\n");
         return;
@@ -192,11 +217,22 @@ void setPin(int PIN) {
 
 }
 
-void removePin(int PIN) {     
-	// Your stuff here.
+void removePin(int PIN) {
+    // Your stuff here.
+    
 }
 
- 
+void pwm_duty_cycle(struct pwm_device *pwm, int percent){
+    if(percent == 0)
+        pwm_config(pwm, 0, 10000000);
+    else if(percent < 101)
+        pwm_config(pwm, 100000*percent, 10000000);
+    else {
+        printk("Invalid duty cycle\n");
+        return;
+    }
+}
+
 void moveRobot(char command) {
     switch(command) {
         case FORWARD:
@@ -206,11 +242,11 @@ void moveRobot(char command) {
         case LEFT:
             motorControl(LEFT_MOTOR, STOP);
             motorControl(RIGHT_MOTOR, FORWARD);
-            break; 
+            break;
         case BACK:
             motorControl(LEFT_MOTOR, BACK);
             motorControl(RIGHT_MOTOR, BACK);
-            break; 
+            break;
         case RIGHT:
             motorControl(LEFT_MOTOR, FORWARD);
             motorControl(RIGHT_MOTOR, STOP);
@@ -222,30 +258,41 @@ void moveRobot(char command) {
         default:
             printk("Illegal command input\n");
             break;
-    }   
+    }
 }
 
 void motorControl(bool ifLeftMotor, char command) {
-    int enable      = ifLeftMotor ? EN1 : EN2;
-    int motorPos    = ifLeftMotor ? A_1 : A_3;
-    int motorNeg    = ifLeftMotor ? A_2 : A_4;
+    struct pwm_device *enable   = ifLeftMotor ? pwm0 : pwm1;
+    int motorPos    		= ifLeftMotor ? A_1 : A_3;
+    int motorNeg    		= ifLeftMotor ? A_2 : A_4;
 
     switch (command) {
         case FORWARD:
-            gpio_set_value(enable, SPEED);
+            pwm_duty_cycle(enable, SPEED);
             gpio_set_value(motorPos, 1);
             gpio_set_value(motorNeg, 0);
             break;
         case BACK:
-            gpio_set_value(enable, SPEED);
+            pwm_duty_cycle(enable, SPEED);
             gpio_set_value(motorPos, 0);
             gpio_set_value(motorNeg, 1);
-            break;    
+            break;
         case STOP:
             gpio_set_value(motorPos, 0);
             gpio_set_value(motorNeg, 0);
             break;
         default:
-            break;           
+            break;
     }
+}
+
+long memory_ioctl (struct file *filp, unsigned int cmd, unsigned long arg){
+    printk("<1>in ioctl\n");
+    if(cmd==0){
+	    //your stuff here
+    }
+    else if(cmd==1){ //adjust PWM
+        SPEED = arg;
+    }
+  return(0); // success!
 }
