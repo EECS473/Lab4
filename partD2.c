@@ -1,15 +1,20 @@
+
 /**
  * @file    h-bridge device driver
  * @author  Kevin Yang
  * @date    3/20/2017
- * @brief   Assignment code for a kernel module that controls a h-bridge.
+ * @brief   Solution code for a kernel module that controls a h-bridge.
  *          Pin mounts and commands are defined below.
- */
+*/
 
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/kernel.h>	/* printk() */
 #include <linux/gpio.h>
+#include <linux/pwm.h>
+#include <linux/platform_device.h>
+#include <linux/of.h>
+#include <linux/err.h>
 
 #include <linux/slab.h>		/* kmalloc() */
 #include <linux/fs.h>		/* everything... */
@@ -35,44 +40,33 @@ MODULE_LICENSE ("Dual BSD/GPL");
 #define RIGHT   'R'
 #define STOP    'S'
 
+//Adjust to add intermediate speeds
+#define IDLE    0
+int     SPEED   = 40;
+
 //Adjust to reverse motor polarity
 int LEFT_MOTOR  = true;
 int RIGHT_MOTOR = false;
 
+//These pins are for the RPI5, adjust if using a different board
 
-// These pins are for the RPI5, adjust if using a different board
+//PWM pins are configured in /boot/firmware/config.txt
+//Left motor enable configured to pin 12
+//Right motor enable configured to pin 13
 
-// PWM pins are configured in boot/firmware/config.txt
-// Left motor enable configured to pin 12
-// Right motor enable configured to pin 13
+//The Device Tree overlay maps:
+//  "left"  -> PWM channel 0
+//  "right" -> PWM channel 1
+struct pwm_device *pwm0 = NULL;  //pin 12
+struct pwm_device *pwm1 = NULL;  //pin 13
 
-/*
-    Due to the moving of PWM control to the RP1, the PWM pins should be configured in the terminal
-    before running your implementation of this file. 
+// pinctrl-rp1 has GPIO base 569 on the Lab 4 Pi 5 image, refer to part D1 of this lab
+#define GPIO_BASE 569
 
-    Please refer to pwm_setup.py, or run 
-    
-    sudo python3 pwm_setup.py 
-    
-    after updating your /boot/firmware/config.txt file with the following
-
-    dtoverlay=pwm-2chan,pin=12,func=4,pin2=13,func2=4
-
-    The default values (which can be changed) in pwm_setup.py are:
-
-    Frequency = 100Hz
-    Duty Cycle = 40%
-*/
-
-// The RP1 GPIO controller has legacy GPIO base 569
-// For the corresponding GPIOs, add the base to the GPIO number
-
-#define RP1_BASE 569
-
-#define A_1 (RP1_BASE + 5)      // GPIO5,  Y1, left motor positive
-#define A_2 (RP1_BASE + 6)      // GPIO6,  Y2, left motor negative
-#define A_3 (RP1_BASE + 19)     // GPIO19, Y3, right motor positive
-#define A_4 (RP1_BASE + 26)     // GPIO26, Y4, right motor negative
+#define A_1 (GPIO_BASE + 5)   //Y1, left motor positive
+#define A_2 (GPIO_BASE + 6)   //Y2, left motor negative
+#define A_3 (GPIO_BASE + 19)  //Y3, right motor positive
+#define A_4 (GPIO_BASE + 26)  //Y4, right motor negative
 
 int memory_open (struct inode *inode, struct file *filp);
 int memory_release (struct inode *inode, struct file *filp);
@@ -86,9 +80,15 @@ long memory_ioctl (struct file *filp, unsigned int cmd, unsigned long arg);
 
 void setPin(int PIN);
 void removePin(int PIN);
+struct pwm_device *enPWM(int pwm_num);
+void removePWM(struct pwm_device *pwm);
 void moveRobot(char command);
 void motorControl(bool ifLeftMotor, char command);
+void pwm_duty_cycle(struct pwm_device *pwm, int percent);
 
+// pointer to the Device Tree entry which is setup through the
+// functions at the bottom
+static struct device *partd2_dev;
 
 struct file_operations memory_fops =
 {
@@ -99,8 +99,6 @@ struct file_operations memory_fops =
   .unlocked_ioctl = memory_ioctl
 };
 
-module_init (memory_init);
-module_exit (memory_exit);
 
 int memory_major = 60;
 char *memory_buffer;
@@ -127,6 +125,23 @@ int memory_init (void) {
     setPin(A_2);
     setPin(A_3);
     setPin(A_4);
+    pwm0 = enPWM(0);
+
+    // error checking if PWM is not found
+    if (IS_ERR(pwm0)) {
+        result = PTR_ERR(pwm0);
+        pwm0 = NULL;
+        goto fail;
+    }
+
+    pwm1 = enPWM(1);
+
+    // error checking if PWM is not found
+    if (IS_ERR(pwm1)) {
+        result = PTR_ERR(pwm1);
+        pwm1 = NULL;
+        goto fail;
+    }
 
     return 0;
 
@@ -137,10 +152,16 @@ fail:
 
 void memory_exit (void) {
     unregister_chrdev (memory_major, "memory");
-    if (memory_buffer){
+    if (memory_buffer) {
         kfree (memory_buffer);
+        memory_buffer = NULL;
     }
     printk ("Removing memory module\n");
+
+    removePWM(pwm0);
+    removePWM(pwm1);
+    pwm0 = NULL;
+    pwm1 = NULL;
 
     removePin(A_1);
     removePin(A_2);
@@ -158,8 +179,7 @@ int memory_release (struct inode *inode, struct file *filp) {
     return 0;
 }
 
-ssize_t memory_read (struct file * filp, char *buf, size_t count,
-                     loff_t * f_pos) {
+ssize_t memory_read (struct file * filp, char *buf, size_t count, loff_t * f_pos) {
     /* Transfering data to user space */
     /* Changing reading position as best suits */
     if (*f_pos == 0) {
@@ -199,6 +219,47 @@ ssize_t memory_write (struct file * filp, const char *buf, size_t count, loff_t 
     return 1;
 }
 
+struct pwm_device *enPWM(int pwm_num) {
+    struct pwm_device *pwm;
+    const char *pwm_name;
+
+    // pulling left and right from device tree
+    if (pwm_num == 0)
+        pwm_name = "left";
+    else if (pwm_num == 1)
+        pwm_name = "right";
+    else {
+        printk("Invalid PWM number\n");
+        return NULL;
+    }
+
+    pwm = devm_pwm_get(partd2_dev, pwm_name);
+
+    // error checking if PWM is not found
+    if (IS_ERR(pwm)) {
+        printk("Could not get PWM%d! error=%ld\n",
+               pwm_num, PTR_ERR(pwm));
+        return pwm;
+    }
+
+    //set PWM to 100hz with SPEED% duty cycle
+    pwm_duty_cycle(pwm, SPEED);
+    return pwm;
+}
+
+void removePWM(struct pwm_device *pwm){
+    struct pwm_state state;
+
+    if (!pwm)
+        return;
+
+    pwm_get_state(pwm, &state);
+    state.enabled = false;
+    pwm_apply_might_sleep(pwm, &state);
+
+    // devm_pwm_get() automatically releases the PWM when the platform device is removed.
+     
+}
 
 void setPin(int PIN) {
     if (!gpio_is_valid(PIN)) {
@@ -207,7 +268,9 @@ void setPin(int PIN) {
     }
     // Your stuff here.
 
-    printk("GPIO pin %d exported... Pin state is currently: %d\n", PIN, gpio_get_value(PIN));
+    printk("GPIO pin %d exported... Pin state is currently: %d\n",
+           PIN, gpio_get_value(PIN));
+
 }
 
 void removePin(int PIN) {
@@ -215,6 +278,31 @@ void removePin(int PIN) {
 
 }
 
+void pwm_duty_cycle(struct pwm_device *pwm, int percent){
+    struct pwm_state state;
+    int result;
+
+    // error checks
+    if (!pwm)
+        return;
+
+    if(percent > 100) {
+        printk("Invalid duty cycle\n");
+        return;
+    }
+
+    pwm_get_state(pwm, &state);
+    
+    // PWM configuration step
+    state.period = 10000000;
+    state.duty_cycle = 100000ULL * percent;
+    state.polarity = PWM_POLARITY_NORMAL;
+    state.enabled = true;
+
+    result = pwm_apply_might_sleep(pwm, &state);
+    if (result)
+        printk("Could not set PWM duty cycle: %d\n", result);
+}
 
 void moveRobot(char command) {
     switch(command) {
@@ -245,15 +333,18 @@ void moveRobot(char command) {
 }
 
 void motorControl(bool ifLeftMotor, char command) {
-    int motorPos = ifLeftMotor ? A_1 : A_3;
-    int motorNeg = ifLeftMotor ? A_2 : A_4;
+    struct pwm_device *enable   = ifLeftMotor ? pwm0 : pwm1;
+    int motorPos    		= ifLeftMotor ? A_1 : A_3;
+    int motorNeg    		= ifLeftMotor ? A_2 : A_4;
 
     switch (command) {
         case FORWARD:
+            pwm_duty_cycle(enable, SPEED);
             gpio_set_value(motorPos, 1);
             gpio_set_value(motorNeg, 0);
             break;
         case BACK:
+            pwm_duty_cycle(enable, SPEED);
             gpio_set_value(motorPos, 0);
             gpio_set_value(motorNeg, 1);
             break;
@@ -271,6 +362,53 @@ long memory_ioctl (struct file *filp, unsigned int cmd, unsigned long arg){
     if(cmd==0){
         //your stuff here
     }
-
+    else if(cmd==1){ //adjust PWM
+        if (arg <= 100) {
+            SPEED = arg;
+            pwm_duty_cycle(pwm0, SPEED);
+            pwm_duty_cycle(pwm1, SPEED);
+        } else {
+            return -EINVAL;
+        }
+    }
     return(0); // success!
 }
+
+
+// For Debian Trixie, we need to add a platform driver
+// to expose PWM to kernelspace. When the kernel is inserted,
+// Linux will look for the Device Tree device and run the 
+// and initialize. Once the kernel is removed, the cleanup function partd2_remove
+// will clean up the rest.
+
+// @brief platform driver initialization
+static int partd2_init(struct platform_device *pdev)
+{
+    partd2_dev = &pdev->dev;
+    return memory_init();
+}
+
+// @brief cleanup function for the driver
+static void partd2_remove(struct platform_device *pdev)
+{
+    memory_exit();
+    partd2_dev = NULL;
+}
+
+static const struct of_device_id partd2_of_match[] = {
+    { .compatible = "eecs473,partd2-pwm" },
+    { }
+};
+
+MODULE_DEVICE_TABLE(of, partd2_of_match);
+
+static struct platform_driver partd2_driver = {
+    .probe = partd2_init,
+    .remove = partd2_remove,
+    .driver = {
+        .name = "partd2-pwm",
+        .of_match_table = partd2_of_match,
+    },
+};
+
+module_platform_driver(partd2_driver);
