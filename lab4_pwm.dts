@@ -2,7 +2,8 @@
 /plugin/;
 
 / {
-    compatible = "brcm,bcm2711";
+    // this overlay supports both RPI4 and 5
+    compatible = "brcm,bcm2711", "brcm,bcm2712";
 
     fragment@0 {
         target-path = "/";
@@ -16,6 +17,7 @@
                        <&pwm 1 10000000 0>;
 
                 pwm-names = "left", "right";
+                status = "okay";
             };
         };
     };

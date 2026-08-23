@@ -3,7 +3,7 @@
  * @file    h-bridge device driver
  * @author  Kevin Yang
  * @date    3/20/2017
- * @brief   Solution code for a kernel module that controls a h-bridge.
+ * @brief   Assignment code for a kernel module that controls a h-bridge on Raspberry Pi 4 or 5.
  *          Pin mounts and commands are defined below.
 */
 
@@ -48,7 +48,7 @@ int     SPEED   = 40;
 int LEFT_MOTOR  = true;
 int RIGHT_MOTOR = false;
 
-//These pins are for the RPI4 B, adjust if using a different board
+//These pins are for the RPI4 B / RPI5, selected at runtime from Device Tree.
 
 //PWM pins are configured in /boot/firmware/config.txt
 //Left motor enable configured to pin 12
@@ -60,8 +60,15 @@ int RIGHT_MOTOR = false;
 struct pwm_device *pwm0 = NULL;  //pin 12
 struct pwm_device *pwm1 = NULL;  //pin 13
 
-// pinctrl-bcm2711 has GPIO base 512, refer to part D1 of this lab
-#define GPIO_BASE 512
+
+// Linux global GPIO numbering differs between the two Lab 4 images:
+// Pi 4 (pinctrl-bcm2711): base 512
+// Pi 5 (pinctrl-rp1):     base 569
+
+// The GPIO base numbering will differ between the RPI4 and 5
+// Refer to the initialization of the platform driver partd2_init(), which will
+// define GPIO_BASE depending on the GPIO control chip
+static int GPIO_BASE;
 
 #define A_1 (GPIO_BASE + 5)   //Y1, left motor positive
 #define A_2 (GPIO_BASE + 6)   //Y2, left motor negative
@@ -384,6 +391,27 @@ long memory_ioctl (struct file *filp, unsigned int cmd, unsigned long arg){
 // @brief platform driver initialization
 static int partd2_init(struct platform_device *pdev)
 {
+    /*
+     * Detect the board from the root Device Tree.
+     * Raspberry Pi 4:
+     *   compatible contains "brcm,bcm2711"
+     *
+     * Raspberry Pi 5:
+     *   compatible contains "brcm,bcm2712"
+     */
+    if (of_machine_is_compatible("brcm,bcm2712")) {
+        GPIO_BASE = 569;
+        printk("Detected Raspberry Pi 5: GPIO base = %d\n", GPIO_BASE);
+    }
+    else if (of_machine_is_compatible("brcm,bcm2711")) {
+        GPIO_BASE = 512;
+        printk("Detected Raspberry Pi 4: GPIO base = %d\n", GPIO_BASE);
+    }
+    else {
+        printk("Unsupported Raspberry Pi platform\n");
+        return -ENODEV;
+    }
+
     partd2_dev = &pdev->dev;
     return memory_init();
 }
