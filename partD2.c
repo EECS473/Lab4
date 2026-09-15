@@ -10,7 +10,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/kernel.h> /* printk() */
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/pwm.h>
 #include <linux/platform_device.h>
 #include <linux/of.h>
@@ -59,19 +59,15 @@ int RIGHT_MOTOR = false;
 struct pwm_device *pwm0 = NULL; // pin 12
 struct pwm_device *pwm1 = NULL; // pin 13
 
-// Linux global GPIO numbering differs between the two Lab 4 images:
-// Pi 4 (pinctrl-bcm2711): base 512
-// Pi 5 (pinctrl-rp1):     base 569
+// GPIO line offsets are described by motor-gpios in lab4_pwm.dts.
+#define MOTOR_LEFT_POS   0
+#define MOTOR_LEFT_NEG   1
+#define MOTOR_RIGHT_POS  2
+#define MOTOR_RIGHT_NEG  3
+#define MOTOR_GPIO_COUNT 4
 
-// The GPIO base numbering will differ between the RPI4 and 5
-// Refer to the initialization of the platform driver partd2_init(), which will
-// define GPIO_BASE depending on the GPIO control chip
-static int GPIO_BASE;
-
-#define A_1 (GPIO_BASE + 5)  // Y1, left motor positive
-#define A_2 (GPIO_BASE + 6)  // Y2, left motor negative
-#define A_3 (GPIO_BASE + 19) // Y3, right motor positive
-#define A_4 (GPIO_BASE + 26) // Y4, right motor negative
+// GPIO descriptors
+static struct gpio_desc *motor_gpios[MOTOR_GPIO_COUNT];
 
 int memory_open(struct inode *inode, struct file *filp);
 int memory_release(struct inode *inode, struct file *filp);
@@ -83,8 +79,8 @@ void memory_exit(void);
 int memory_init(void);
 long memory_ioctl(struct file *filp, unsigned int cmd, unsigned long arg);
 
-void setPin(int PIN);
-void removePin(int PIN);
+void setPin(int index);
+void removePin(int index);
 struct pwm_device *enPWM(int pwm_num);
 void removePWM(struct pwm_device *pwm);
 void moveRobot(char command);
@@ -127,10 +123,10 @@ int memory_init(void)
     memset(memory_buffer, 0, 1);
     printk("Inserting memory module\n");
 
-    setPin(A_1);
-    setPin(A_2);
-    setPin(A_3);
-    setPin(A_4);
+    setPin(MOTOR_LEFT_POS);
+    setPin(MOTOR_LEFT_NEG);
+    setPin(MOTOR_RIGHT_POS);
+    setPin(MOTOR_RIGHT_NEG);
     pwm0 = enPWM(0);
 
     // error checking if PWM is not found
@@ -173,10 +169,10 @@ void memory_exit(void)
     pwm0 = NULL;
     pwm1 = NULL;
 
-    removePin(A_1);
-    removePin(A_2);
-    removePin(A_3);
-    removePin(A_4);
+    removePin(MOTOR_LEFT_POS);
+    removePin(MOTOR_LEFT_NEG);
+    removePin(MOTOR_RIGHT_POS);
+    removePin(MOTOR_RIGHT_NEG);
 
     printk("GPIO freed, goodbye\n");
 }
@@ -287,20 +283,20 @@ void removePWM(struct pwm_device *pwm)
     // devm_pwm_get() automatically releases the PWM when the platform device is removed.
 }
 
-void setPin(int PIN)
+void setPin(int index)
 {
-    if (!gpio_is_valid(PIN))
+    if (index < 0 || index >= MOTOR_GPIO_COUNT)
     {
-        printk("Invalid GPIO pin\n");
+        printk(KERN_ERR "Invalid GPIO index %d\n", index);
         return;
     }
     // Your stuff here.
-
-    printk("GPIO pin %d exported... Pin state is currently: %d\n",
-           PIN, gpio_get_value(PIN));
+    
+    printk(KERN_INFO "GPIO pin %d acquired... Pin state is currently: %d\n",
+           index, gpiod_get_value_cansleep(motor_gpios[index]));
 }
 
-void removePin(int PIN)
+void removePin(int index)
 {
     // Your stuff here.
 }
@@ -366,24 +362,29 @@ void moveRobot(char command)
 void motorControl(bool ifLeftMotor, char command)
 {
     struct pwm_device *enable = ifLeftMotor ? pwm0 : pwm1;
-    int motorPos = ifLeftMotor ? A_1 : A_3;
-    int motorNeg = ifLeftMotor ? A_2 : A_4;
+    struct gpio_desc *motorPos = motor_gpios[
+        ifLeftMotor ? MOTOR_LEFT_POS : MOTOR_RIGHT_POS];
+    struct gpio_desc *motorNeg = motor_gpios[
+        ifLeftMotor ? MOTOR_LEFT_NEG : MOTOR_RIGHT_NEG];
+
+    if (!motorPos || !motorNeg)
+        return;
 
     switch (command)
     {
     case FORWARD:
         pwm_duty_cycle(enable, SPEED);
-        gpio_set_value(motorPos, 1);
-        gpio_set_value(motorNeg, 0);
+        gpiod_set_value_cansleep(motorPos, 1);
+        gpiod_set_value_cansleep(motorNeg, 0);
         break;
     case BACK:
         pwm_duty_cycle(enable, SPEED);
-        gpio_set_value(motorPos, 0);
-        gpio_set_value(motorNeg, 1);
+        gpiod_set_value_cansleep(motorPos, 0);
+        gpiod_set_value_cansleep(motorNeg, 1);
         break;
     case STOP:
-        gpio_set_value(motorPos, 0);
-        gpio_set_value(motorNeg, 0);
+        gpiod_set_value_cansleep(motorPos, 0);
+        gpiod_set_value_cansleep(motorNeg, 0);
         break;
     default:
         break;
@@ -420,18 +421,15 @@ long memory_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 // will clean up the rest.
 
 // platform driver initialization
-// detect whether the board is RPI 4 or RPI 5 and assign correct GPIO_BASE
 static int partd2_init(struct platform_device *pdev)
 {
     if (of_machine_is_compatible("brcm,bcm2712"))
     {
-        GPIO_BASE = 569;
-        printk("Detected Raspberry Pi 5: GPIO base = %d\n", GPIO_BASE);
+        printk("Detected Raspberry Pi 5\n");
     }
     else if (of_machine_is_compatible("brcm,bcm2711"))
     {
-        GPIO_BASE = 512;
-        printk("Detected Raspberry Pi 4: GPIO base = %d\n", GPIO_BASE);
+        printk("Detected Raspberry Pi 4\n");
     }
     else
     {

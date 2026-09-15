@@ -17,6 +17,12 @@
                        <&pwm 1 10000000 0>;
 
                 pwm-names = "left", "right";
+
+                /* H-bridge direction lines: Y1, Y2, Y3, Y4. */
+                motor-gpios = <&gpio 5 0>,
+                              <&gpio 6 0>,
+                              <&gpio 19 0>,
+                              <&gpio 26 0>;
                 status = "okay";
             };
         };
