@@ -1,0 +1,24 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+    // this overlay supports both RPI4 and 5
+    compatible = "brcm,bcm2711", "brcm,bcm2712";
+
+    fragment@0 {
+        target-path = "/";
+
+        __overlay__ {
+            partd2_pwm {
+                compatible = "eecs473,partd2-pwm";
+
+                /* PWM0 and PWM1, 10 ms period = 100 Hz */
+                pwms = <&pwm 0 10000000 0>,
+                       <&pwm 1 10000000 0>;
+
+                pwm-names = "left", "right";
+                status = "okay";
+            };
+        };
+    };
+};

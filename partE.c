@@ -1,4 +1,4 @@
-// This file contains snippets of code that can be added to partC.c //
+// This file contains snippets of code that can be added to partD2.c //
 
 long memory_ioctl (struct file *filp, unsigned int cmd, \
 		  unsigned long arg);

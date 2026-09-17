@@ -1,0 +1,12 @@
+# YOLO via the Ultralytics library (the standard YOLO API). Pulls in PyTorch.
+# Pinned to the version the lab was tested with so future runs are reproducible.
+ultralytics==8.4.90
+
+# IMPORTANT:
+# Newer torch (2.13.0) crashes with
+# "Illegal instruction"
+torch==2.8.0
+torchvision==0.23.0
+
+opencv-python   # camera capture, JPEG encoding for the stream, drawing boxes
+numpy
